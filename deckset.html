@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>エネミオン デッキセット</title>
+<meta property="og:type" content="website">
+<meta property="og:title" content="デッキセット｜エネミオン">
+<meta property="og:description" content="対戦前にオリジナルデッキをあらかじめ作成・保存しておけるページです。">
+<meta property="og:url" content="https://example.github.io/enemion/deckset.html">
+<meta name="theme-color" content="#b23a2e">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div id="fatal-error-banner" class="hidden" style="position:fixed; top:0; left:0; right:0; background:#b23a2e; color:#fff; padding:12px 16px; font-family:'JetBrains Mono',monospace; font-size:12px; z-index:9999; white-space:pre-wrap;"></div>
+
+  <nav class="top-nav">
+    <a href="index.html">対戦</a>
+    <a href="deckset.html" class="active">デッキセット</a>
+    <a href="solo.html">ひとりで</a>
+  </nav>
+
+  <div id="deckset-screen" class="screen">
+    <div class="wrap">
+      <div class="wrap-head">
+        <h2>デッキセット</h2>
+      </div>
+
+      <div id="deckset-identify">
+        <label for="input-ds-name">名前（本人確認に使用します）</label>
+        <input type="text" id="input-ds-name" placeholder="例：名無しの異能者" autocomplete="off">
+        <button class="seal-btn" id="btn-ds-load" style="width:auto; padding:12px 22px;">この名前でデッキセットを開く</button>
+      </div>
+
+      <div id="deckset-list-wrap" class="hidden">
+        <div class="you-badge" id="ds-name-badge"></div>
+        <div id="deckset-list" style="margin-bottom:20px;"></div>
+        <button class="ghost-btn" id="btn-ds-new">＋ 新しいデッキを作る</button>
+      </div>
+
+      <div id="deckset-editor" class="hidden">
+        <label for="input-ds-label">デッキ名</label>
+        <input type="text" id="input-ds-label" placeholder="例：速攻型">
+        <div class="deck-grid" id="deckset-grid"></div>
+        <div class="phase-actions">
+          <button class="seal-btn" id="btn-ds-save" style="width:auto; padding:12px 22px;">このデッキを保存</button>
+          <button class="ghost-btn" id="btn-ds-cancel-edit">キャンセル</button>
+          <span class="ready-note" id="deckset-error"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script type="module">
+  import {
+    db, ref, set, push, get, remove,
+    escapeHtml, sanitizeKey, emptyCards,
+    buildEffectSelectOptions, cardFormHtml, renderCardGrid,
+    addEffectGeneric, validateDeckWide, syncCardFieldsFromDom
+  } from './shared.js';
+
+  // ============ デッキセット機能 ============
+  let dsNameKey = null;
+  let dsNameRaw = null;
+  let dsEditorCards = null;
+  let dsEditorEffects = null;
+  let dsEditingId = null; // null=新規, それ以外=既存デッキの更新
+
+  function getDsCardNumberFromDom(idx){
+    return idx + 1; // 数字はカード枠に固定
+  }
+
+  document.getElementById('btn-ds-load').addEventListener('click', async () => {
+    const nameRaw = document.getElementById('input-ds-name').value.trim();
+    if(!nameRaw) return;
+    dsNameRaw = nameRaw;
+    dsNameKey = sanitizeKey(nameRaw);
+    document.getElementById('ds-name-badge').textContent = `本人確認: ${nameRaw}`;
+    document.getElementById('deckset-identify').classList.add('hidden');
+    document.getElementById('deckset-list-wrap').classList.remove('hidden');
+    await refreshDecksetList();
+  });
+
+  async function refreshDecksetList(){
+    const listEl = document.getElementById('deckset-list');
+    listEl.innerHTML = '読み込み中…';
+    try{
+      const snap = await get(ref(db, `deckSets/${dsNameKey}/decks`));
+      const data = snap.exists() ? snap.val() : {};
+      const entries = Object.entries(data);
+      if(entries.length === 0){
+        listEl.innerHTML = '<p class="ready-note">まだ保存されたデッキがありません。</p>';
+        return;
+      }
+      listEl.innerHTML = '';
+      entries.forEach(([id, deck]) => {
+        const div = document.createElement('div');
+        div.className = 'member-card';
+        div.style.marginBottom = '8px';
+        const cardNames = (deck.cards||[]).map(c => c.name || '無題').join('／');
+        div.innerHTML = `
+          <div class="role-label">${escapeHtml(deck.label || '無題のデッキ')}</div>
+          <div class="member-name">${escapeHtml(cardNames)}</div>
+          <div style="margin-top:8px; display:flex; gap:8px;">
+            <button type="button" class="ghost-btn" data-ds-edit="${id}">編集</button>
+            <button type="button" class="ghost-btn" data-ds-delete="${id}">削除</button>
+          </div>
+        `;
+        listEl.appendChild(div);
+      });
+      listEl.querySelectorAll('[data-ds-edit]').forEach(btn => {
+        btn.addEventListener('click', () => openDsEditor(btn.dataset.dsEdit, data[btn.dataset.dsEdit]));
+      });
+      listEl.querySelectorAll('[data-ds-delete]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if(!confirm('このデッキを削除しますか？')) return;
+          const r = ref(db, `deckSets/${dsNameKey}/decks/${btn.dataset.dsDelete}`);
+          const s = await get(r);
+          if(s.exists()){ await remove(r); }
+          await refreshDecksetList();
+        });
+      });
+    } catch(err){
+      listEl.innerHTML = `<p class="ready-note">読み込みに失敗しました: ${escapeHtml(err.message||String(err))}</p>`;
+    }
+  }
+
+  document.getElementById('btn-ds-new').addEventListener('click', () => openDsEditor(null, null));
+
+  function openDsEditor(id, deck){
+    dsEditingId = id;
+    dsEditorCards = deck ? JSON.parse(JSON.stringify(deck.cards)) : emptyCards();
+    dsEditorEffects = dsEditorCards.map(c => (c.effectNames||[]).slice());
+    document.getElementById('input-ds-label').value = deck ? (deck.label||'') : '';
+    document.getElementById('deckset-error').textContent = '';
+    document.getElementById('deckset-list-wrap').classList.add('hidden');
+    document.getElementById('deckset-editor').classList.remove('hidden');
+    // 前に開いていた別デッキの入力内容が残ったままだと、
+    // renderDsEditor内のsyncCardFieldsFromDomがその古い値を新デッキへ書き戻してしまうため、
+    // 先にグリッドを空にしてから描画する。
+    document.getElementById('deckset-grid').innerHTML = '';
+    renderDsEditor();
+  }
+
+  function renderDsEditor(){
+    const grid = document.getElementById('deckset-grid');
+    syncCardFieldsFromDom(grid, dsEditorCards);
+    renderCardGrid(grid, dsEditorCards, dsEditorEffects, false, {
+      onAddEffect: (idx, name) => {
+        const err = document.getElementById('deckset-error');
+        const cardNumber = getDsCardNumberFromDom(idx);
+        if(addEffectGeneric(dsEditorEffects, idx, name, cardNumber, err)){ renderDsEditor(); }
+      },
+      onRemoveEffect: (idx, name) => {
+        dsEditorEffects[idx] = dsEditorEffects[idx].filter(n => n !== name);
+        renderDsEditor();
+      },
+      onImageChange: (idx, dataUrl) => {
+        dsEditorCards[idx].image = dataUrl;
+        renderDsEditor();
+      }
+    });
+  }
+
+  document.getElementById('btn-ds-cancel-edit').addEventListener('click', () => {
+    document.getElementById('deckset-editor').classList.add('hidden');
+    document.getElementById('deckset-list-wrap').classList.remove('hidden');
+  });
+
+  document.getElementById('btn-ds-save').addEventListener('click', async () => {
+    const err = document.getElementById('deckset-error');
+    err.textContent = '';
+    const grid = document.getElementById('deckset-grid');
+    const label = document.getElementById('input-ds-label').value.trim();
+    if(!label){ err.textContent = 'デッキ名を入力してください。'; return; }
+
+    const cards = [0,1,2,3].map(idx => {
+      const get2 = (f) => grid.querySelector(`[data-f="${f}"][data-i="${idx}"]`).value;
+      return {
+        name: get2('name').trim(),
+        number: idx + 1,
+        species: get2('species'),
+        type: get2('type'),
+        effectNames: (dsEditorEffects[idx] || []).slice(),
+        flavor: get2('flavor'),
+        image: dsEditorCards[idx] ? (dsEditorCards[idx].image || null) : null,
+        used: false
+      };
+    });
+    if(cards.some(c => !c.name)){ err.textContent = '全てのカードにカード名を入力してください。'; return; }
+    const wideError = validateDeckWide(cards);
+    if(wideError){ err.textContent = wideError; return; }
+
+    const deckData = { label, cards, savedAt: Date.now() };
+    if(dsEditingId){
+      await set(ref(db, `deckSets/${dsNameKey}/decks/${dsEditingId}`), deckData);
+    } else {
+      await push(ref(db, `deckSets/${dsNameKey}/decks`), deckData);
+    }
+    document.getElementById('deckset-editor').classList.add('hidden');
+    document.getElementById('deckset-list-wrap').classList.remove('hidden');
+    await refreshDecksetList();
+  });
+</script>
+</body>
+</html>
